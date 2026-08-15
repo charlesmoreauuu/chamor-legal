@@ -50,6 +50,10 @@
   <script>
     (function () {
       var STORE_URL = 'https://apps.apple.com/app/beatthis-daily-challenges/id6780211717';
+      // How long to wait for the app to take over before assuming it isn't
+      // installed. A cold launch on an older phone can take over a second, and
+      // redirecting out from under a launching app is worse than waiting.
+      var FALLBACK_MS = 1600;
       var path = window.location.pathname;
       var join = /^\/join\/([A-Z0-9]{6})\/?$/i.exec(path);
       var add  = /^\/add\/([A-Z0-9]{6})\/?$/i.exec(path);
@@ -121,38 +125,53 @@
         });
       }
 
-      // "Open BeatThis": try the app, and if nothing takes over quickly, send
-      // the user to the App Store instead of a dead "address invalid" error.
+      // Hand off to the app, falling back to the App Store if nothing takes
+      // over.
+      //
+      // The launch MUST be a top-level navigation. This previously injected a
+      // hidden iframe pointing at the custom scheme, the standard trick around
+      // 2012, but ignored by iOS Safari since iOS 9 and by every WKWebView
+      // in-app browser (WhatsApp, Instagram) since. The iframe did nothing at
+      // all: no launch, no error. The page never hid, so the timer below fired
+      // for EVERYONE and sent them to the App Store, installed or not. That is
+      // the bug where people with the app tapped "Open BeatThis" and landed in
+      // the store.
       var deeplink = 'beatthis://' + kind + '/' + code;
+
+      function openAppThenStore() {
+        copyInvite();
+
+        var t0 = Date.now();
+        var handedOff = false;
+        // Deliberately NOT listening for 'blur': the "address invalid" alert
+        // shown when the app isn't installed can blur the window without any
+        // hand-off having happened, which would cancel the fallback below and
+        // strand a new user on a dead page. Only a genuinely hidden document
+        // proves another app took the foreground.
+        function onHide() { handedOff = true; }
+        document.addEventListener('visibilitychange', onHide);
+        window.addEventListener('pagehide', onHide);
+
+        setTimeout(function () {
+          document.removeEventListener('visibilitychange', onHide);
+          window.removeEventListener('pagehide', onHide);
+          if (handedOff || document.hidden) return;
+          // A timer that fires much later than scheduled means the page was
+          // suspended, which only happens when another app took the foreground.
+          // Treat that as a successful hand-off rather than bouncing the user to
+          // the store the moment they switch back.
+          if (Date.now() - t0 > FALLBACK_MS + 800) return;
+          window.location = STORE_URL;
+        }, FALLBACK_MS);
+
+        window.location.href = deeplink;
+      }
+
       var openBtn = document.getElementById('openBtn');
       openBtn.href = deeplink;
       openBtn.addEventListener('click', function (e) {
         e.preventDefault();
-        copyInvite();
-        var hidden = false;
-        function onHide() { hidden = true; }
-        document.addEventListener('visibilitychange', onHide);
-        window.addEventListener('pagehide', onHide);
-        setTimeout(function () {
-          document.removeEventListener('visibilitychange', onHide);
-          window.removeEventListener('pagehide', onHide);
-          if (!hidden && !document.hidden) window.location = STORE_URL;
-        }, 1200);
-        // Attempt the app via a HIDDEN IFRAME instead of window.location: a
-        // custom-scheme navigation that fails inside an iframe does NOT trigger
-        // Safari's "address invalid" alert (which is what a top-level
-        // window.location = 'beatthis://…' shows when the app isn't installed).
-        // If the app is installed it takes over and the page hides (cancelling
-        // the App Store fallback above); if not, it fails silently and we fall
-        // back to the store.
-        try {
-          var frame = document.createElement('iframe');
-          frame.style.display = 'none';
-          frame.src = deeplink;
-          document.body.appendChild(frame);
-        } catch (err) {
-          window.location = deeplink;
-        }
+        openAppThenStore();
       });
     })();
   </script>
